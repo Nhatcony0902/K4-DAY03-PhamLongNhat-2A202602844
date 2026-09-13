@@ -6,6 +6,8 @@ Hỗ trợ Native Tool Calling và chuyển đổi linh hoạt qua biến môi t
 import os
 import sys
 import json
+import re
+import time
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
@@ -35,8 +37,17 @@ class MockOfflineProvider(BaseLLMProvider):
         return f"[Mock Chatbot Response]: Xin chào! Tôi đã nhận được câu hỏi '{prompt}'. (Chế độ Chatbot không có Tool tra cứu dữ liệu thời gian thực)."
 
     def generate_with_tools(self, prompt: str, tools_schema: List[Dict[str, Any]], system_prompt: str = "") -> Dict[str, Any]:
+        # Đã có Observation từ bước trước (ReAct scratchpad) -> Mock kết thúc bằng Final Answer
+        if "Observation = " in prompt:
+            last_observation = prompt.rsplit("Observation = ", 1)[1].split("\n", 1)[0]
+            return {
+                "type": "text",
+                "content": f"[Mock Agent Response]: Kết quả từ MCP Server: {last_observation}",
+                "thought": "Đã có Observation từ MCP Server, tổng hợp câu trả lời cuối cùng."
+            }
+
         prompt_lower = prompt.lower()
-        
+
         # Mô phỏng nhận diện intent gọi Tool
         if "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower:
             return {
@@ -107,11 +118,7 @@ class GeminiProvider(BaseLLMProvider):
                 temperature=0.2
             )
 
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config
-            )
+            response = self._generate_with_retry(client, prompt, config)
 
             # Kiểm tra xem Gemini có trả về Tool Call không
             if response.function_calls:
@@ -131,8 +138,24 @@ class GeminiProvider(BaseLLMProvider):
                 }
 
         except Exception as e:
-            print(f"⚠️ [Gemini API Warning]: Không thể kết nối live API ({str(e)}). Tự động fallback về Mock.")
-            return MockOfflineProvider().generate_with_tools(prompt, tools_schema, system_prompt)
+            # Đã cấu hình API Key thật: KHÔNG fallback im lặng về Mock (tránh trace nghiệm thu bị lẫn dữ liệu giả)
+            raise RuntimeError(f"[Gemini API Error]: Gọi live API thất bại: {str(e)}") from e
+
+    def _generate_with_retry(self, client, prompt: str, config, max_retries: int = 4):
+        """Gọi Gemini, tự chờ và thử lại khi dính giới hạn tần suất 429 (free tier: 5 request/phút)"""
+        for attempt in range(max_retries + 1):
+            try:
+                return client.models.generate_content(model=self.model_name, contents=prompt, config=config)
+            except Exception as e:
+                # 429 (giới hạn tần suất) và 503 (model quá tải tạm thời) đều nên chờ rồi thử lại
+                is_rate_limited = any(code in str(e) for code in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE"))
+                is_daily_quota = "PerDay" in str(e)  # hết quota ngày: chờ vài giây cũng vô ích
+                if not is_rate_limited or is_daily_quota or attempt == max_retries:
+                    raise
+                match = re.search(r"retry in ([\d.]+)s", str(e))
+                wait_s = float(match.group(1)) + 2 if match else 30 * (attempt + 1)
+                print(f"⏳ [Gemini Rate Limit 429]: Chờ {wait_s:.0f}s rồi thử lại (lần {attempt + 1}/{max_retries})...")
+                time.sleep(wait_s)
 
 
 class OpenAIProvider(BaseLLMProvider):
@@ -207,8 +230,8 @@ class OpenAIProvider(BaseLLMProvider):
                     "thought": "OpenAI phản hồi trực tiếp bằng văn bản (không cần gọi công cụ)."
                 }
         except Exception as e:
-            print(f"⚠️ [OpenAI API Warning]: Không thể kết nối live API ({str(e)}). Tự động fallback về Mock.")
-            return MockOfflineProvider().generate_with_tools(prompt, tools_schema, system_prompt)
+            # Đã cấu hình API Key thật: KHÔNG fallback im lặng về Mock (tránh trace nghiệm thu bị lẫn dữ liệu giả)
+            raise RuntimeError(f"[OpenAI API Error]: Gọi live API thất bại: {str(e)}") from e
 
 
 def get_llm_provider() -> BaseLLMProvider:

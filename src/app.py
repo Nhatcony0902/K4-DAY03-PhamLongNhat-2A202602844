@@ -71,14 +71,30 @@ def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) ->
     step = 0
     trace_logs = []
     tools_list = mcp_server.list_tools()
-    
+    # Scratchpad lưu các cặp Action -> Observation để nạp lại cho LLM ở lượt kế tiếp
+    scratchpad = []
+
     while step < MAX_ITERATIONS:
         step += 1
         step_start_time = time.time()
         print(f"\n--- 🔄 Vòng lặp ReAct Loop (Step {step}/{MAX_ITERATIONS}) ---")
-        
-        # Gọi LLM với Native Tool Calling Specs
-        llm_response = provider.generate_with_tools(user_query, tools_list, system_prompt=REACT_AGENT_SYSTEM_PROMPT)
+
+        # Gọi LLM với Native Tool Calling Specs (kèm lịch sử Observation các bước trước)
+        try:
+            llm_response = provider.generate_with_tools(
+                build_react_prompt(user_query, scratchpad), tools_list, system_prompt=REACT_AGENT_SYSTEM_PROMPT
+            )
+        except RuntimeError as e:
+            # Lỗi LLM API (ví dụ hết quota): ghi nhận trung thực vào trace thay vì làm mất các bước đã chạy
+            print(f"❌ [LLM API ERROR]: {str(e)[:300]}")
+            trace_logs.append({
+                "step": step,
+                "query": user_query,
+                "action_type": "LLM_API_ERROR",
+                "output": str(e)[:300],
+                "latency_ms": round((time.time() - step_start_time) * 1000, 2)
+            })
+            break
         latency_ms = round((time.time() - step_start_time) * 1000, 2)
         
         thought = llm_response.get("thought", "Đang suy luận...")
@@ -106,60 +122,71 @@ def run_react_agent(user_query: str, provider, mcp_server: MCPAcademicServer) ->
             print(f"🛠️ [Action Proposed]: {tool_name}({arguments})")
             
             # Thực thi Tool qua MCP Server
+            tool_start_time = time.time()
             mcp_result = mcp_server.call_tool(tool_name, arguments)
+            tool_latency_ms = round((time.time() - tool_start_time) * 1000, 2)
             obs_data = mcp_result.get("result", {})
-            
+
             if not obs_data:
-                print(f"👁️ [Observation từ MCP Server]: {{}}")
-                print(f"⚠️ [CHÚ Ý]: MCP Server trả về kết quả rỗng! Học viên cần hoàn thành TODO 2.1 trong 'src/mcp_server.py'.")
-                final_answer = "Chưa thể trả lời chi tiết do chưa nhận được dữ liệu từ MCP Server (hãy hoàn thành TODO 2.1)."
-            else:
-                obs_str = json.dumps(obs_data, ensure_ascii=False)
-                print(f"👁️ [Observation từ MCP Server]: {obs_str}")
-                
-                # Tổng hợp Final Answer từ kết quả Observation thực tế
-                if obs_data.get("status") == "SUCCESS":
-                    if "data" in obs_data:
-                        d = obs_data["data"]
-                        final_answer = (
-                            f"Kết quả tra cứu cho sinh viên {obs_data.get('student_id', '')} ({d.get('full_name', '')}): "
-                            f"Lớp {d.get('class', '')}, GPA: {d.get('gpa', '')}, Email: {d.get('email', '')}, "
-                            f"Trạng thái: {d.get('status', '')}, Cố vấn: {d.get('advisor', '')}."
-                        )
-                    elif "message" in obs_data:
-                        final_answer = obs_data["message"]
-                    else:
-                        final_answer = f"Đã hoàn tất xử lý qua MCP Server: {json.dumps(obs_data, ensure_ascii=False)}"
-                elif obs_data.get("status") == "NOT_FOUND":
-                    final_answer = obs_data.get("message", "Không tìm thấy thông tin sinh viên yêu cầu.")
-                else:
-                    final_answer = f"Phản hồi từ công cụ: {json.dumps(obs_data, ensure_ascii=False)}"
-            
+                obs_data = {"status": "EMPTY_RESULT", "error": "MCP Server trả về kết quả rỗng."}
+            obs_str = json.dumps(obs_data, ensure_ascii=False)
+            print(f"👁️ [Observation từ MCP Server]: {obs_str}")
+
             trace_logs.append({
                 "step": step,
                 "query": user_query,
                 "action_type": "TOOL_EXECUTION",
+                "thought": thought,
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "observation": obs_data,
+                "latency_ms": latency_ms,
+                "tool_latency_ms": tool_latency_ms
+            })
+
+            # Nạp Observation vào scratchpad để LLM quyết định bước tiếp theo (không break)
+            scratchpad.append({"tool_name": tool_name, "arguments": arguments, "observation": obs_str})
+
+        else:
+            print(f"⚠️ [CHÚ Ý]: Phản hồi LLM không hợp lệ: {llm_response}")
+            trace_logs.append({
+                "step": step,
+                "query": user_query,
+                "action_type": "INVALID_LLM_RESPONSE",
+                "output": llm_response,
                 "latency_ms": latency_ms
             })
-            
-            # Kết thúc vòng lặp sau khi hoàn tất Observation và xuất Final Answer
-            print(f"🧠 [Thought]: Đã nhận được dữ liệu từ MCP Server. Tổng hợp kết quả phản hồi.")
-            print(f"🏁 [Final Answer]: {final_answer}")
-            
-            trace_logs.append({
-                "step": step + 1,
-                "query": user_query,
-                "action_type": "FINAL_ANSWER",
-                "thought": "Tổng hợp kết quả từ MCP Server thành công.",
-                "output": final_answer,
-                "latency_ms": 10.0
-            })
             break
+    else:
+        # Vòng lặp chạy hết MAX_ITERATIONS mà LLM chưa đưa ra Final Answer
+        print(f"⛔ [MAX_ITERATIONS]: Đã đạt giới hạn {MAX_ITERATIONS} bước mà chưa có Final Answer.")
+        trace_logs.append({
+            "step": step,
+            "query": user_query,
+            "action_type": "MAX_ITERATIONS_REACHED",
+            "output": f"Dừng sau {MAX_ITERATIONS} bước để tránh vòng lặp vô hạn.",
+            "latency_ms": 0.0
+        })
 
     return trace_logs
+
+
+def build_react_prompt(user_query: str, scratchpad: list) -> str:
+    """Ghép câu hỏi gốc với lịch sử Action -> Observation của các bước trước"""
+    if not scratchpad:
+        return user_query
+    history = "\n".join(
+        f"- Bước {i}: Action = {item['tool_name']}({json.dumps(item['arguments'], ensure_ascii=False)})\n"
+        f"  Observation = {item['observation']}"
+        for i, item in enumerate(scratchpad, start=1)
+    )
+    return (
+        f"Câu hỏi của sinh viên: {user_query}\n\n"
+        f"Lịch sử các bước ReAct đã thực hiện (dữ liệu thật từ MCP Server):\n{history}\n\n"
+        "Dựa trên các Observation trên: nếu vẫn cần thêm dữ liệu hoặc hành động để hoàn thành yêu cầu, "
+        "hãy gọi Tool tiếp theo (không lặp lại lời gọi đã có kết quả). "
+        "Nếu đã đủ thông tin, hãy trả lời cuối cùng bằng văn bản cho sinh viên."
+    )
 
 
 if __name__ == "__main__":
@@ -213,7 +240,8 @@ if __name__ == "__main__":
             else:
                 logs = run_react_agent(tc["question"], provider, mcp_server)
                 all_traces.extend(logs)
-                completed_count += 1
+                if logs and logs[-1]["action_type"] == "FINAL_ANSWER":
+                    completed_count += 1
                 
         print(f"\n==================================================")
         print(f"📊 [KẾT QUẢ TEST SUITE]: Đã thực thi {completed_count}/{len(tests)} Test Cases | {todo_count} Test Cases đang chờ điền câu hỏi (TODO)")

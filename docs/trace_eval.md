@@ -24,7 +24,7 @@
 
 > ⚠️ **YÊU CẦU NGHIỆM THU:** Mở tệp `.env` điền `GEMINI_API_KEY` (hoặc `OPENAI_API_KEY`) để kết nối LLM thật trước khi thực thi `python src/app.py --all`. Bài nộp chỉ dùng Mock Offline Provider sẽ không đạt điểm nghiệm thực tế.
 
-**Cấu hình chạy nghiệm thu:** `LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-2.5-flash-lite` (Google Gemini API thật, Native Tool Calling). Lệnh: `python src/app.py --all`.
+**Cấu hình chạy nghiệm thu:** `LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-3.5-flash-lite` (Google Gemini API thật, Native Tool Calling). Lệnh: `python src/app.py --all` — 5/5 Test Cases pass trong **một lần chạy liên tục**.
 
 Dán 1 đoạn trích xuất log tiêu biểu từ file `docs/trace_waterfall.json` sinh ra từ phản hồi LLM API thật — **TC04 (multi-step reasoning)**, Agent tự tra cứu cố vấn rồi dùng chính Observation đó để đặt lịch:
 
@@ -41,30 +41,30 @@ Dán 1 đoạn trích xuất log tiêu biểu từ file `docs/trace_waterfall.js
       "student_id": "SV2026001",
       "data": { "full_name": "Nguyễn Văn An", "class": "AI-K4", "gpa": 3.85, "status": "Đang học", "advisor": "PGS.TS Nguyễn Văn A" }
     },
-    "latency_ms": 33518.96,
+    "latency_ms": 2436.62,
     "tool_latency_ms": 0.0
   },
   {
     "step": 2,
     "action_type": "TOOL_EXECUTION",
-    "thought": "Gemini quyết định gọi công cụ 'schedule_appointment' với tham số: {\"advisor_name\": \"PGS.TS Nguyễn Văn A\", \"student_id\": \"SV2026001\", \"datetime_str\": \"14:00 15/09/2026\"}",
+    "thought": "Gemini quyết định gọi công cụ 'schedule_appointment' với tham số: {\"student_id\": \"SV2026001\", \"datetime_str\": \"14:00 15/09/2026\", \"advisor_name\": \"PGS.TS Nguyễn Văn A\"}",
     "tool_name": "schedule_appointment",
-    "arguments": { "advisor_name": "PGS.TS Nguyễn Văn A", "student_id": "SV2026001", "datetime_str": "14:00 15/09/2026" },
+    "arguments": { "student_id": "SV2026001", "datetime_str": "14:00 15/09/2026", "advisor_name": "PGS.TS Nguyễn Văn A" },
     "observation": {
       "status": "SUCCESS",
       "booking_id": "BK-SV2026001-99",
       "advisor": "PGS.TS Nguyễn Văn A",
       "datetime": "14:00 15/09/2026"
     },
-    "latency_ms": 2350.13,
-    "tool_latency_ms": 1.0
+    "latency_ms": 1668.1,
+    "tool_latency_ms": 0.0
   },
   {
     "step": 3,
     "action_type": "FINAL_ANSWER",
     "thought": "Gemini phản hồi trực tiếp bằng văn bản (không cần gọi công cụ).",
-    "output": "Thông tin của bạn đã được ghi nhận. Lịch hẹn tư vấn với Cố vấn học tập PGS.TS Nguyễn Văn A của bạn đã được đặt thành công vào lúc 14:00 ngày 15/09/2026. Mã đặt lịch là BK-SV2026001-99.",
-    "latency_ms": 2129.19
+    "output": "Dựa trên thông tin từ hệ thống học vụ VinUni, tôi đã hoàn thành yêu cầu của bạn: 1. Tra cứu thông tin cố vấn học tập: Sinh viên Nguyễn Văn An (Mã: SV2026001) — Cố vấn học tập: PGS.TS Nguyễn Văn A. 2. Đặt lịch hẹn tư vấn: 14:00 ngày 15/09/2026 — Mã đặt lịch: BK-SV2026001-99 — Trạng thái: Thành công. ...",
+    "latency_ms": 5563.43
   }
 ]
 ```
@@ -80,14 +80,14 @@ Dán 1 đoạn trích xuất log tiêu biểu từ file `docs/trace_waterfall.js
 | TC05 | `academic_query(SV9999999)` → NOT_FOUND → FINAL_ANSWER báo không tìm thấy, không bịa GPA | ✅ Edge case |
 
 **Nhận xét quan sát (Observability):**
-- `latency_ms` cao bất thường (~33s, ~93s) ở một số bước là do thời gian chờ retry khi Gemini free tier trả về 429 (giới hạn request/phút); các bước bình thường ~1.7–2.5s. `tool_latency_ms` của MCP Server ~0–1ms → nút cổ chai là LLM, không phải Tool.
-- Trong lần chạy `--all`, bước tổng hợp cuối của TC04 gặp lỗi `503 UNAVAILABLE` (model quá tải tạm thời). Đã bổ sung retry cho 503 và chạy lại riêng TC04 trên API thật; trace TC04 trong file là kết quả của lần chạy lại này.
-- TC01: model không có dữ liệu quy chế VinUni nên trả lời hướng sinh viên liên hệ phòng Đào tạo thay vì bịa số liệu — phù hợp nguyên tắc Anti-Hallucination.
+- Mỗi bước gọi LLM mất ~1.3–5.6s (bước FINAL_ANSWER tổng hợp dài nhất: TC04 5.56s, TC01 4.84s), trong khi `tool_latency_ms` của MCP Server ~0ms → nút cổ chai là LLM, không phải Tool. Tổng TC04 (3 bước) ≈ 9.7s.
+- Trong các lần chạy thử trước đó gặp lỗi tạm thời từ Gemini (`429 RESOURCE_EXHAUSTED`, `503 UNAVAILABLE`, `Server disconnected`) khiến 1 Test Case bị ghi `LLM_API_ERROR`. Đã bổ sung retry có chờ cho các lỗi tạm thời này; lần chạy nghiệm thu cuối không cần retry và pass 5/5.
+- TC01: câu hỏi chung, model trả lời trực tiếp không gọi Tool — đúng quyết định "Chatbot là đủ" trong sơ đồ Agentic Fit. Lưu ý: nội dung quy chế là kiến thức chung của LLM, không được xác thực bằng Tool (hạn chế của Cấp 2; có thể bổ sung Tool tra cứu văn bản quy chế nếu cần độ chính xác).
 
 **Cải tiến so với starter code:**
 1. ReAct Loop thật: Observation được nạp lại cho LLM qua scratchpad, vòng lặp chỉ dừng khi LLM trả FINAL_ANSWER (starter `break` ngay sau Tool Call đầu tiên nên không chạy được multi-step).
 2. Bỏ cơ chế fallback im lặng về Mock khi đã có API Key thật — lỗi API được ghi vào trace (`LLM_API_ERROR`) thay vì trộn dữ liệu Mock vào kết quả nghiệm thu.
-3. Retry có chờ cho lỗi 429/503; guard `MAX_ITERATIONS_REACHED` chống vòng lặp vô hạn.
+3. Retry có chờ cho lỗi tạm thời (429/503/mất kết nối); guard `MAX_ITERATIONS_REACHED` chống vòng lặp vô hạn.
 
 ---
 

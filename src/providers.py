@@ -147,8 +147,9 @@ class GeminiProvider(BaseLLMProvider):
             try:
                 return client.models.generate_content(model=self.model_name, contents=prompt, config=config)
             except Exception as e:
-                # 429 (giới hạn tần suất) và 503 (model quá tải tạm thời) đều nên chờ rồi thử lại
-                is_rate_limited = any(code in str(e) for code in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE"))
+                # 429 (giới hạn tần suất), 503 (model quá tải) và lỗi mạng tạm thời đều nên chờ rồi thử lại
+                transient_markers = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "disconnected", "timed out", "Timeout")
+                is_rate_limited = any(marker in str(e) for marker in transient_markers)
                 is_daily_quota = "PerDay" in str(e)  # hết quota ngày: chờ vài giây cũng vô ích
                 if not is_rate_limited or is_daily_quota or attempt == max_retries:
                     raise
